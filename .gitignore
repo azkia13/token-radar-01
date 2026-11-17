@@ -1,3 +1,10 @@
+# Build output: main.ts writes the ranked board, data.js, the dashboard copy
+# and the dossier here when MAKEFUN_OUTPUT_DIR points at it.
 out/
 out-*/
+# Never commit a dependency tree: the entrypoint uses only the Node standard
+# library, so nothing in node_modules/ is part of the build.
 node_modules/
+# Editor and operating-system litter, never part of an entry.
+.DS_Store
+*.log

@@ -1,13 +1,19 @@
-// Token Radar, model radar-2.
+// Token Radar, model radar-3.
 //
 // The starter's model (radar-1) priced every protocol at one flat multiple of
 // TVL: implied = TVL x 0.25 x growth x maturity. That 0.25 is the global
 // median market-cap/TVL of the live-token protocols in this very snapshot, so
 // it is a fair centre — but it is blind to category: a lending protocol and a
 // bridge do not trade at the same multiple of TVL, and the snapshot proves
-// it. radar-2 calibrates the multiple per category from the protocols whose
-// token already trades, then checks itself with a walk-forward test before it
-// scores anything pre-token.
+// it. radar-2 calibrated the multiple per category from the protocols whose
+// token already trades, then checked itself with a walk-forward test before it
+// scored anything pre-token. radar-3 keeps that calibration exactly — the
+// multiples, and therefore the board, are unchanged — and fixes what radar-2
+// hid: the walk-forward test is now reported per category, so the dashboard
+// names the categories where the model is weakest instead of hiding them
+// inside one average error, and every category's multiple is published with
+// the spread of the live comps behind it, so a reader sees which multiples
+// rest on agreement and which on scattered evidence.
 //
 //   1. Live set: every protocol in the snapshot with a market cap, TVL > 0,
 //      and category != CEX (exchanges are not comparable launches).
@@ -23,7 +29,15 @@
 //      set a whole category). Small categories are handled by the shrinkage
 //      itself: with one or two comps the multiple stays close to global. No
 //      protocol name is ever special-cased; the multiples come from the
-//      snapshot alone.
+//      snapshot alone. The spread of each category's comps — median(|r -
+//      median_cat|) / median_cat — is measured and published beside the
+//      multiple, so a reader sees which multiples rest on agreement and
+//      which on scattered evidence. Weighting the shrinkage by that spread
+//      was tried and rejected on this snapshot: it made the walk-forward
+//      worse at every weight (average forward/reverse error 1.392 at weight
+//      0, 1.413 at 0.25, 1.429 at 0.5, 1.454 at 1.0), because a scattered
+//      category's median still beats the global one. So the fit keeps the
+//      plain shrink and the spread is a diagnostic, not a weight.
 //   4. A pre-token protocol scores
 //        implied = round(tvl_usd x mult_cat x growthMult x maturityMult)
 //      with mult_cat from step 3 (global when its category has no live comp).
@@ -31,12 +45,16 @@
 //      multiples on protocols listed before 2024-01-01 and test on those
 //      listed after, then fit on the later half and test on the earlier half.
 //      The reported error is the median |log(implied / mcap)| on the held-out
-//      half, for radar-2 and for the flat starter, side by side. On this
-//      snapshot radar-2 is about 10% tighter (median |log err| ~1.39 vs ~1.55).
-//      That is still a wide band — roughly x0.25 to x4.0 — and the dashboard
-//      says so: TVL alone cannot pin a token's value, so every row carries its
+//      half, for radar-3 and for the flat starter, side by side. That is
+//      still a wide band — roughly x0.25 to x4.0 — and the dashboard says
+//      so: TVL alone cannot pin a token's value, so every row carries its
 //      calibration (calibrated vs global multiple) and the board is a ranking
 //      of relative value, not a price forecast.
+//   6. Per-category walk-forward: the same forward/reverse test, run
+//      category by category (only categories with at least two live comps on
+//      each side of 2024-01-01), worst first. One average error hides where
+//      the model fails; this table is the honest version of it, and the
+//      build log prints its three worst rows so a reader sees them first.
 //
 // What the snapshot does NOT carry, and the model does not invent: fees,
 // runway and FDV. No fee or runway figure exists in the snapshot, so no
@@ -91,7 +109,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 160;
@@ -104,15 +122,25 @@ export interface CategoryMultiple {
   category: string;
   live_n: number;
   multiple: number;
+  spread: number;
+}
+
+/** One category's own walk-forward errors, worst first on the dashboard. */
+export interface CategoryBacktest {
+  category: string;
+  live_n: number;
+  forward_med_abs_log_err: number;
+  reverse_med_abs_log_err: number;
 }
 
 /** The walk-forward check, computed at build time from the snapshot's live set. */
 export interface Backtest {
   live_n: number;
-  radar2_med_abs_log_err: number;
+  radar3_med_abs_log_err: number;
   starter_med_abs_log_err: number;
   forward_med_abs_log_err: number;
   reverse_med_abs_log_err: number;
+  category_backtests: CategoryBacktest[];
   note: string;
 }
 
@@ -261,8 +289,13 @@ function residual(p: SnapshotProtocol, asOf: string, model: ModelConstants): num
 }
 
 /** Fit the calibration from a set of live protocols (global + per-category multiples). */
-function fitCalibration(live: SnapshotProtocol[], asOf: string, model: ModelConstants): { global: number; byCategory: Map<string, number>; counts: Map<string, number> } {
-  const global = median(live.map((p) => residual(p, asOf, model)));
+function fitCalibration(
+  live: SnapshotProtocol[],
+  asOf: string,
+  model: ModelConstants,
+  fallbackGlobal?: number,
+): { global: number; byCategory: Map<string, number>; counts: Map<string, number>; spreads: Map<string, number> } {
+  const global = fallbackGlobal ?? median(live.map((p) => residual(p, asOf, model)));
   const byCat = new Map<string, number[]>();
   for (const p of live) {
     const c = p.category ?? 'Other';
@@ -272,16 +305,23 @@ function fitCalibration(live: SnapshotProtocol[], asOf: string, model: ModelCons
   // One guardrail, stated on the dashboard: no multiple runs past three
   // times the global median, so one live comp's 400x ratio can never set a
   // whole category. Small categories are handled by the shrinkage itself:
-  // with one or two comps the multiple stays close to global.
+  // with one or two comps the multiple stays close to global. The spread
+  // is measured here and published beside the multiple; it is a diagnostic
+  // only — weighting the shrinkage by it was tried and made the
+  // walk-forward worse, so the fit keeps the plain shrink.
   const byCategory = new Map<string, number>();
   const counts = new Map<string, number>();
+  const spreads = new Map<string, number>();
   for (const [c, rs] of byCat) {
     const n = rs.length;
     counts.set(c, n);
-    const mult = (n * median(rs) + model.shrink * global) / (n + model.shrink);
+    const catMedian = median(rs);
+    const mad = median(rs.map((r) => Math.abs(r - catMedian)));
+    spreads.set(c, catMedian > 0 ? mad / catMedian : 0);
+    const mult = (n * catMedian + model.shrink * global) / (n + model.shrink);
     byCategory.set(c, Math.min(mult, 3 * global));
   }
-  return { global, byCategory, counts };
+  return { global, byCategory, counts, spreads };
 }
 
 /** Median |log(implied / mcap)| of a fitted calibration on a held-out live set. */
@@ -309,30 +349,58 @@ function starterError(test: SnapshotProtocol[], asOf: string): number {
   return median(errs);
 }
 
+/** Per-category walk-forward errors: fit on a category's older comps, test on its newer ones, then back. */
+function categoryBacktests(live: SnapshotProtocol[], asOf: string, model: ModelConstants, global: number): CategoryBacktest[] {
+  const byCat = new Map<string, SnapshotProtocol[]>();
+  for (const p of live) {
+    const c = p.category ?? 'Other';
+    if (!byCat.has(c)) byCat.set(c, []);
+    byCat.get(c)!.push(p);
+  }
+  // A category earns a row only when both sides of the split can be fitted
+  // and tested: at least two live comps listed before 2024-01-01 and two
+  // after. Fewer than that and the "test" would be one protocol's luck, not
+  // a category's error. The fallback global is the full live set's, so a
+  // category with no comp on the fit side falls back to the same global the
+  // board uses, never to a median fitted on its own handful.
+  const out: CategoryBacktest[] = [];
+  for (const [c, ps] of byCat) {
+    const old = ps.filter((p) => p.listed_at !== null && p.listed_at < '2024-01-01');
+    const recent = ps.filter((p) => p.listed_at !== null && p.listed_at >= '2024-01-01');
+    if (old.length < 2 || recent.length < 2) continue;
+    const forward = heldOutError(fitCalibration(old, asOf, model, global), recent, asOf, model);
+    const reverse = heldOutError(fitCalibration(recent, asOf, model, global), old, asOf, model);
+    out.push({ category: c, live_n: ps.length, forward_med_abs_log_err: round3(forward), reverse_med_abs_log_err: round3(reverse) });
+  }
+  const worst = (c: CategoryBacktest): number => Math.max(c.forward_med_abs_log_err, c.reverse_med_abs_log_err);
+  return out.sort((a, b) => worst(b) - worst(a) || (a.category < b.category ? -1 : 1));
+}
+
 /** Calibrate from the whole live set and walk-forward-test it, both directions. */
 export function calibrate(snapshot: Snapshot, model: ModelConstants = MODEL): Calibration {
   const live = liveSet(snapshot);
   const fit = fitCalibration(live, snapshot.as_of, model);
   const categories: CategoryMultiple[] = [...fit.byCategory.entries()]
-    .map(([category, multiple]) => ({ category, live_n: fit.counts.get(category) ?? 0, multiple: round4(multiple) }))
+    .map(([category, multiple]) => ({ category, live_n: fit.counts.get(category) ?? 0, multiple: round4(multiple), spread: round3(fit.spreads.get(category) ?? 0) }))
     .sort((a, b) => b.live_n - a.live_n || (a.category < b.category ? -1 : 1));
   const old = live.filter((p) => p.listed_at !== null && p.listed_at < '2024-01-01');
   const recent = live.filter((p) => p.listed_at !== null && p.listed_at >= '2024-01-01');
   const forward = old.length > 0 && recent.length > 0 ? heldOutError(fitCalibration(old, snapshot.as_of, model), recent, snapshot.as_of, model) : NaN;
   const reverse = old.length > 0 && recent.length > 0 ? heldOutError(fitCalibration(recent, snapshot.as_of, model), old, snapshot.as_of, model) : NaN;
   const both = [...old, ...recent];
-  const radar2 = both.length > 0 ? heldOutError(fit, both, snapshot.as_of, model) : NaN;
+  const radar3 = both.length > 0 ? heldOutError(fit, both, snapshot.as_of, model) : NaN;
   const starter = both.length > 0 ? starterError(both, snapshot.as_of) : NaN;
-  const band = Number.isFinite(radar2) ? `A ${round3(radar2)} error means the typical implied value is within about x${round2(Math.exp(-radar2))} to x${round2(Math.exp(radar2))} of the market cap` : 'The error is not measurable on this snapshot';
+  const band = Number.isFinite(radar3) ? `A ${round3(radar3)} error means the typical implied value is within about x${round2(Math.exp(-radar3))} to x${round2(Math.exp(radar3))} of the market cap` : 'The error is not measurable on this snapshot';
   return {
     global_multiple: round4(fit.global),
     categories,
     backtest: {
       live_n: live.length,
-      radar2_med_abs_log_err: round3(radar2),
+      radar3_med_abs_log_err: round3(radar3),
       starter_med_abs_log_err: round3(starter),
       forward_med_abs_log_err: round3(forward),
       reverse_med_abs_log_err: round3(reverse),
+      category_backtests: categoryBacktests(live, snapshot.as_of, model, fit.global),
       note: `Walk-forward on the live-token protocols in this snapshot: multiples fitted on protocols listed before 2024-01-01 and tested on those listed after (forward), then the other way round (reverse). Error is median |log(implied / market cap)|. ${band}: TVL alone leaves a wide band, so the board ranks relative value, never a price.`,
     },
   };

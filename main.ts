@@ -1,4 +1,4 @@
-// Token Radar, model radar-2: read the sealed snapshot, score every pre-token
+// Token Radar, model radar-3: read the sealed snapshot, score every pre-token
 // protocol with the calibrated model in lib/model.ts, write the ranked board
 // to /output/board.json, and copy this repository's dashboard/ and
 // screenshots/ to /output. Last, write /output/dossier.json, the summary the
@@ -85,6 +85,16 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: model radar-2, global multiple ${radar.calibration.global_multiple}, backtest median |log err| ${radar.calibration.backtest.radar2_med_abs_log_err} vs starter ${radar.calibration.backtest.starter_med_abs_log_err} on ${radar.calibration.backtest.live_n} live protocols\n` +
+    `token radar: model ${radar.model_version}, global multiple ${radar.calibration.global_multiple}, backtest median |log err| ${radar.calibration.backtest.radar3_med_abs_log_err} vs starter ${radar.calibration.backtest.starter_med_abs_log_err} on ${radar.calibration.backtest.live_n} live protocols\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
+
+// The build log names the model's weak spots first: the three categories with
+// the worst per-category walk-forward error, so a reader sees where the
+// ranking is least trustworthy before opening the dashboard.
+const weakest = radar.calibration.backtest.category_backtests.slice(0, 3);
+if (weakest.length > 0) {
+  process.stdout.write(
+    `token radar: weakest categories by walk-forward error: ${weakest.map((c) => `${c.category} (n=${c.live_n}, forward ${c.forward_med_abs_log_err}, reverse ${c.reverse_med_abs_log_err})`).join('; ')}\n`,
+  );
+}

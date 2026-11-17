@@ -1,8 +1,11 @@
-// Token Radar dashboard, model radar-2. Reads window.RADAR (written beside
+// Token Radar dashboard, model radar-3. Reads window.RADAR (written beside
 // dashboard/ by main.ts) and renders the ranked board, a filterable table, a
 // per-protocol detail drawer with the model's own inputs and the protocol's
-// farm plan, plus the model's calibration and walk-forward backtest. No
-// network: every byte it shows is in data.js.
+// farm plan, plus the model's calibration and walk-forward backtest — the
+// backtest now broken down per category, worst first. Saved views let a
+// reader name the current filters and sort, keep them in localStorage, and
+// bring one back with a click; the last view used is restored on the next
+// visit. No network: every byte it shows is in data.js.
 (function () {
   'use strict';
 
@@ -10,6 +13,48 @@
   if (!DATA) return;
   var app = document.getElementById('board');
   var state = { q: '', category: 'all', chain: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
+
+  // Saved views: named filter-and-sort states in localStorage, plus the last
+  // view used, restored when the page opens with no view in the hash. A view
+  // is only ever the reader's own filters; nothing about it leaves the page.
+  var VIEW_KEY = 'token-radar-views-v1';
+  var LAST_KEY = 'token-radar-last-v1';
+  function loadViews() {
+    try {
+      var raw = window.localStorage.getItem(VIEW_KEY);
+      var parsed = raw ? JSON.parse(raw) : {};
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (e) { return {}; }
+  }
+  function storeViews(views) {
+    try { window.localStorage.setItem(VIEW_KEY, JSON.stringify(views)); } catch (e) { /* storage blocked or full: the view just does not persist */ }
+  }
+  function viewSnapshot() {
+    return { q: state.q, category: state.category, chain: state.chain, sort: state.sort, dir: state.dir, tab: state.tab };
+  }
+  function applyView(v) {
+    if (!v || typeof v !== 'object') return;
+    state.q = typeof v.q === 'string' ? v.q : '';
+    state.category = typeof v.category === 'string' ? v.category : 'all';
+    state.chain = typeof v.chain === 'string' ? v.chain : 'all';
+    state.sort = typeof v.sort === 'string' ? v.sort : 'implied';
+    state.dir = v.dir === 1 ? 1 : -1;
+    state.tab = v.tab === 'live' ? 'live' : 'pre-token';
+    state.selected = null;
+    writeHash();
+    render();
+  }
+  function rememberLast() {
+    try { window.localStorage.setItem(LAST_KEY, JSON.stringify(viewSnapshot())); } catch (e) { /* private mode: the last view is forgotten */ }
+  }
+  function restoreLast() {
+    try {
+      var raw = window.localStorage.getItem(LAST_KEY);
+      if (!raw) return false;
+      applyView(JSON.parse(raw));
+      return true;
+    } catch (e) { return false; }
+  }
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -115,7 +160,7 @@
 
   function readHash() {
     var hash = window.location.hash.replace(/^#/, '');
-    if (!hash) return;
+    if (!hash) { restoreLast(); return; }
     var params = new URLSearchParams(hash);
     if (params.get('q')) state.q = params.get('q');
     if (params.get('p')) state.selected = params.get('p');
@@ -133,6 +178,7 @@
     var next = params.toString();
     if (next) window.history.replaceState(null, '', '#' + next);
     else window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    rememberLast();
   }
 
   function rows() {
@@ -214,7 +260,17 @@
       tbody.appendChild(el('tr', null,
         el('td', { text: c.category }),
         el('td', { class: 'num', text: String(c.live_n) }),
-        el('td', { class: 'num', text: String(c.multiple) })
+        el('td', { class: 'num', text: String(c.multiple) }),
+        el('td', { class: 'num', text: String(c.spread) })
+      ));
+    });
+    var catBt = el('tbody');
+    (bt.category_backtests || []).forEach(function (c) {
+      catBt.appendChild(el('tr', null,
+        el('td', { text: c.category }),
+        el('td', { class: 'num', text: String(c.live_n) }),
+        el('td', { class: 'num', text: String(c.forward_med_abs_log_err) }),
+        el('td', { class: 'num', text: String(c.reverse_med_abs_log_err) })
       ));
     });
     return el('section', { class: 'panel model' },
@@ -226,13 +282,56 @@
       el('h3', { text: 'Calibrated multiples (median market-cap / TVL, shrunk to the global ' + cal.global_multiple + ')' }),
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('thead', null, el('tr', null, el('th', { text: 'Category' }), el('th', { class: 'num', text: 'Live comps' }), el('th', { class: 'num', text: 'Multiple' }))),
+          el('thead', null, el('tr', null, el('th', { text: 'Category' }), el('th', { class: 'num', text: 'Live comps' }), el('th', { class: 'num', text: 'Multiple' }), el('th', { class: 'num', text: 'Spread' }))),
           tbody
         )
       ),
+      el('p', { class: 'sub', text: 'Spread is the category\'s relative median absolute deviation: how much its live comps disagree about the multiple. A wide spread pulls the multiple harder toward the global median, so a noisy category cannot set its own multiple on scattered evidence.' }),
       el('h3', { text: 'Walk-forward backtest on ' + bt.live_n + ' live-token protocols' }),
-      el('p', { class: 'sub', text: 'Multiples fitted on protocols listed before 2024, tested on those listed after: median |log error| ' + bt.forward_med_abs_log_err + '. The other way round: ' + bt.reverse_med_abs_log_err + '. Fitted and tested on the whole live set (in-sample, so tighter by construction): radar-2 ' + bt.radar2_med_abs_log_err + ' vs flat starter ' + bt.starter_med_abs_log_err + '. Lower is tighter.' }),
+      el('p', { class: 'sub', text: 'Multiples fitted on protocols listed before 2024, tested on those listed after: median |log error| ' + bt.forward_med_abs_log_err + '. The other way round: ' + bt.reverse_med_abs_log_err + '. Fitted and tested on the whole live set (in-sample, so tighter by construction): radar-3 ' + bt.radar3_med_abs_log_err + ' vs flat starter ' + bt.starter_med_abs_log_err + '. Lower is tighter.' }),
+      el('h3', { text: 'Per-category walk-forward error, worst first' }),
+      el('p', { class: 'sub', text: 'The same forward/reverse test per category, for categories with at least two live comps on each side of 2024. One average error hides where the model fails; these rows are where it fails most.' }),
+      el('div', { class: 'table-wrap' },
+        el('table', null,
+          el('thead', null, el('tr', null, el('th', { text: 'Category' }), el('th', { class: 'num', text: 'Live comps' }), el('th', { class: 'num', text: 'Forward' }), el('th', { class: 'num', text: 'Reverse' }))),
+          catBt
+        )
+      ),
       el('div', { class: 'warn', text: 'Honest limit: the snapshot carries no fees and no runway, so no multiple here claims to be a fee multiple. A median log error near 1.4 means the typical implied value sits within about x0.25 to x4.0 of a live token\'s market cap. The board ranks relative value; it never promises a price.' })
+    );
+  }
+
+  // Saved views: name the current filters and sort, keep the view, bring it
+  // back with one click, delete it with the cross. The name input is empty
+  // on purpose after a save, so a second view does not reuse the first name.
+  function viewsBar() {
+    var views = loadViews();
+    var names = Object.keys(views).sort();
+    var input = el('input', { type: 'text', id: 'view-name', placeholder: 'Name this view', 'aria-label': 'Name for the saved view' });
+    var save = el('button', { type: 'button', class: 'button primary', text: 'Save view', onclick: function () {
+      var name = input.value.trim();
+      if (!name) { input.focus(); return; }
+      var all = loadViews();
+      all[name] = viewSnapshot();
+      storeViews(all);
+      input.value = '';
+      render();
+    } });
+    var chips = names.map(function (name) {
+      return el('span', { class: 'view-chip' },
+        el('button', { type: 'button', text: name, onclick: function () { applyView(loadViews()[name]); } }),
+        el('button', { type: 'button', class: 'view-x', 'aria-label': 'Delete saved view ' + name, text: '×', onclick: function () {
+          var all = loadViews();
+          delete all[name];
+          storeViews(all);
+          render();
+        } })
+      );
+    });
+    return el('div', { class: 'views' },
+      el('span', { class: 'sub', text: 'Saved views' }),
+      el('div', { class: 'field' }, input, save),
+      names.length ? el('div', { class: 'view-list' }, chips) : el('span', { class: 'sub', text: 'No saved views yet — set the filters, name the view, save it.' })
     );
   }
 
@@ -259,13 +358,16 @@
     sort.addEventListener('change', function () { state.sort = sort.value; state.dir = -1; writeHash(); render(); });
     var pre = el('button', { type: 'button', 'aria-pressed': state.tab === 'pre-token' ? 'true' : 'false', text: 'Pre-token', onclick: function () { state.tab = 'pre-token'; render(); } });
     var live = el('button', { type: 'button', 'aria-pressed': state.tab === 'live' ? 'true' : 'false', text: 'Live token', onclick: function () { state.tab = 'live'; render(); } });
-    return el('div', { class: 'controls' },
-      el('div', { class: 'field' }, el('label', { for: 'q', text: 'Search' }), search),
-      el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), cat),
-      el('div', { class: 'field' }, el('label', { for: 'chain', text: 'Chain' }), chain),
-      el('div', { class: 'field' }, el('label', { for: 'sort', text: 'Sort by' }), sort),
-      el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live)),
-      el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
+    return el('div', null,
+      el('div', { class: 'controls' },
+        el('div', { class: 'field' }, el('label', { for: 'q', text: 'Search' }), search),
+        el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), cat),
+        el('div', { class: 'field' }, el('label', { for: 'chain', text: 'Chain' }), chain),
+        el('div', { class: 'field' }, el('label', { for: 'sort', text: 'Sort by' }), sort),
+        el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live)),
+        el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
+      ),
+      viewsBar()
     );
   }
 
