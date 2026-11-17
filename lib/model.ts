@@ -351,7 +351,9 @@ export function impliedValue(
 ): { implied: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null; multiple: number; calibration: 'calibrated' | 'global' } {
   const { growthPct, growthMult, maturityMult, age } = multipliers(protocol, asOf, model);
   const cat = protocol.category ?? 'Other';
-  const multiple = fit.byCategory.get(cat) ?? fit.global;
+  // The multiple the board publishes is the rounded one, so the page can
+  // recompute the row's implied value exactly from the published figures.
+  const multiple = round4(fit.byCategory.get(cat) ?? fit.global);
   const calibration = fit.byCategory.has(cat) ? 'calibrated' : 'global';
   const implied = Math.max(1, Math.round(protocol.tvl_usd * multiple * growthMult * maturityMult));
   return { implied, growthPct, growthMult, maturityMult, age, multiple, calibration };

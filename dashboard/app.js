@@ -315,7 +315,7 @@
       );
       tbody.appendChild(tr);
     });
-    return el('div', { class: 'panel' },
+    return el('div', { class: 'panel', id: 'board-table' },
       el('div', { class: 'table-wrap' },
         el('table', null,
           el('caption', { class: 'sub', text: 'Pre-token protocols, strongest implied value first. Select a row for its model and farm plan.' }),
@@ -386,7 +386,8 @@
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
         el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
-        el('div', null, el('span', { text: 'Implied per $1 farmed' }), el('b', { class: 'num', text: '$' + row.upside_per_dollar.toLocaleString('en-US') }))
+        el('div', null, el('span', { text: 'Farm capital' }), el('b', { class: 'num', text: '$' + capitalFor(row) })),
+        el('div', null, el('span', { text: 'All-in budget' }), el('b', { class: 'num', text: '$' + (capitalFor(row) + (capitalFor(row) >= 150 ? 8 : 4) + 2 * Math.ceil(holdDaysFor(row.age_days) / 7) + 3) }))
       ),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model)) + (impliedOf(row, DATA.model) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' Calibration: ' + (row.calibration === 'calibrated' ? 'this category has live-token comps, so the multiple is fitted to them.' : 'this category has few live comps, so the multiple stays near the global median.') + ' This is an estimate, not a price.' })
     ));
