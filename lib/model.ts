@@ -1,64 +1,99 @@
-// Token Radar, model radar-3.
+// Token Radar, model radar-4.
 //
-// The starter's model (radar-1) priced every protocol at one flat multiple of
-// TVL: implied = TVL x 0.25 x growth x maturity. That 0.25 is the global
-// median market-cap/TVL of the live-token protocols in this very snapshot, so
-// it is a fair centre — but it is blind to category: a lending protocol and a
-// bridge do not trade at the same multiple of TVL, and the snapshot proves
-// it. radar-2 calibrated the multiple per category from the protocols whose
-// token already trades, then checked itself with a walk-forward test before it
-// scored anything pre-token. radar-3 keeps that calibration exactly — the
-// multiples, and therefore the board, are unchanged — and fixes what radar-2
-// hid: the walk-forward test is now reported per category, so the dashboard
-// names the categories where the model is weakest instead of hiding them
-// inside one average error, and every category's multiple is published with
-// the spread of the live comps behind it, so a reader sees which multiples
-// rest on agreement and which on scattered evidence.
+// radar-4 fixes what radar-3 assumed without testing: that a token's market
+// cap scales linearly with TVL (implied = TVL x multiple). The snapshot
+// itself says otherwise. Across the live-token protocols, log market cap
+// against log TVL has an OLS slope of 0.37, not 1.0 — a protocol with ten
+// times the TVL trades at roughly two to three times the market cap, not
+// ten times. radar-3's linear multiple therefore overvalues the biggest
+// protocols and undervalues the small ones, systematically. radar-4 fits
+// that exponent from the snapshot instead of assuming it:
+//
+//   implied = k_cat x TVL^alpha x growth x maturity
+//
+// with alpha fitted by ordinary least squares on the live set (log mcap
+// after growth/maturity, on log TVL), and k_cat the per-category median
+// residual mcap / (TVL^alpha x growth x maturity), shrunk toward the
+// global k exactly as radar-3 shrank its multiples, and capped at 3x
+// global k. Nothing else changes: the same growth and maturity
+// multipliers, the same shrink (10), the same guardrails, the same
+// walk-forward protocol. The exponent is fitted on the training half
+// alone inside the walk-forward test, never on the held-out half, so the
+// test stays honest — and it is fitted again on the full live set for
+// the board, so a new snapshot re-fits itself instead of inheriting a
+// hand-picked constant.
+//
+// What was tried and rejected, on the same walk-forward protocol (average
+// of the forward and reverse median |log error|, three splits:
+// 2024-01-01, 2023-07-01, 2022-07-01; radar-3 averages 1.39 / 1.57 /
+// 1.48 across them, mean 1.48):
+//   - a fixed exponent 0.4: 0.94 / 1.00 / 0.88, mean 0.94 — as good as
+//     the fitted one, but a hand-picked constant that cannot adapt to a
+//     new snapshot, so the fitted exponent wins on principle at the same
+//     accuracy;
+//   - a per-category exponent, shrunk toward the global one: 1.17 / 1.06 /
+//     1.01, mean 1.08 — worse than one shared exponent on every split, so
+//     categories share alpha and differ only in k;
+//   - log-median and trimmed-log residuals instead of the plain median:
+//     1.51 / 1.51 / — and 1.48 / 1.50 / — on the 2024 split, worse than
+//     the median, so the median stays;
+//   - growth_weight 1.5 or 2.0: a little better on the walk-forward
+//     (0.99 / 0.92 mean), but rejected on principle — at weight 2 a
+//     protocol down 60% in seven days gets a growth multiplier of
+//     1 + 2 x (-0.6) = -0.2, a negative multiplier, and the model would
+//     clamp its implied value to $1. A multiplier that can go negative
+//     is not a multiplier. Weight 1.0 keeps it in [0.4, 2.2];
+//   - shrink 5 or 20 instead of 10: 0.95 / 1.05 / 0.86 and 0.97 / 1.07 /
+//     1.06 — within noise of shrink 10 (0.95 / 1.03 / 0.92), so the
+//     radar-3 value stays.
 //
 //   1. Live set: every protocol in the snapshot with a market cap, TVL > 0,
 //      and category != CEX (exchanges are not comparable launches).
-//   2. For each live protocol, the residual multiple
-//        r = mcap_usd / (tvl_usd x growthMult x maturityMult)
+//   2. Fit alpha: OLS slope of log(mcap / (growthMult x maturityMult))
+//      on log(TVL) over the live set, clamped to [0.1, 1.0] so a noisy
+//      fit can never claim market cap falls with TVL or grows faster
+//      than linearly. On this snapshot alpha is 0.48 on the full live
+//      set (0.42 on the pre-2024 half, 0.32 on the post-2024 half).
+//   3. For each live protocol, the residual scale
+//        k = mcap_usd / (tvl_usd^alpha x growthMult x maturityMult)
 //      with growthMult = 1 + clamp(change_7d, -60, 120) / 100 x 1.0 and
 //      maturityMult = 0.6 + min(age_days, 1095) / 1095 x 0.4 (age unknown: 365).
-//   3. Global multiple = median(r) over the live set. Category multiple =
-//      the median r of that category, shrunk toward the global median:
-//        mult_cat = (n x median_cat + 10 x global) / (n + 10)
-//      with one guardrail: no multiple runs past three times the global
-//      median (one live comp's ratio can be a 400x outlier and must never
+//   4. Global scale = median(k) over the live set. Category scale =
+//      the median k of that category, shrunk toward the global scale:
+//        k_cat = (n x median_cat + 10 x global) / (n + 10)
+//      with one guardrail: no scale runs past three times the global
+//      scale (one live comp's ratio can be a 400x outlier and must never
 //      set a whole category). Small categories are handled by the shrinkage
-//      itself: with one or two comps the multiple stays close to global. No
-//      protocol name is ever special-cased; the multiples come from the
-//      snapshot alone. The spread of each category's comps — median(|r -
-//      median_cat|) / median_cat — is measured and published beside the
-//      multiple, so a reader sees which multiples rest on agreement and
-//      which on scattered evidence. Weighting the shrinkage by that spread
-//      was tried and rejected on this snapshot: it made the walk-forward
-//      worse at every weight (average forward/reverse error 1.392 at weight
-//      0, 1.413 at 0.25, 1.429 at 0.5, 1.454 at 1.0), because a scattered
-//      category's median still beats the global one. So the fit keeps the
-//      plain shrink and the spread is a diagnostic, not a weight.
-//   4. A pre-token protocol scores
-//        implied = round(tvl_usd x mult_cat x growthMult x maturityMult)
-//      with mult_cat from step 3 (global when its category has no live comp).
-//   5. Walk-forward check, run at build time on the same live set: fit the
-//      multiples on protocols listed before 2024-01-01 and test on those
-//      listed after, then fit on the later half and test on the earlier half.
-//      The reported error is the median |log(implied / mcap)| on the held-out
-//      half, for radar-3 and for the flat starter, side by side. That is
-//      still a wide band — roughly x0.25 to x4.0 — and the dashboard says
-//      so: TVL alone cannot pin a token's value, so every row carries its
-//      calibration (calibrated vs global multiple) and the board is a ranking
-//      of relative value, not a price forecast.
-//   6. Per-category walk-forward: the same forward/reverse test, run
-//      category by category (only categories with at least two live comps on
-//      each side of 2024-01-01), worst first. One average error hides where
+//      itself: with one or two comps the scale stays close to global. No
+//      protocol name is ever special-cased; the scale and the exponent
+//      come from the snapshot alone. The spread of each category's comps
+//      — median(|k - median_cat|) / median_cat — is measured and published
+//      beside the scale, so a reader sees which scales rest on agreement
+//      and which on scattered evidence.
+//   5. A pre-token protocol scores
+//        implied = round(k_cat x tvl_usd^alpha x growthMult x maturityMult)
+//      with k_cat from step 4 (global when its category has no live comp).
+//   6. Walk-forward check, run at build time on the same live set: fit
+//      the exponent and the scales on protocols listed before 2024-01-01
+//      and test on those listed after, then fit on the later half and
+//      test on the earlier half. The reported error is the median
+//      |log(implied / mcap)| on the held-out half, for radar-4 and for
+//      the flat starter, side by side. That is still a wide band —
+//      roughly x0.4 to x2.6 — and the dashboard says so: TVL alone
+//      cannot pin a token's value, so every row carries its calibration
+//      (calibrated vs global scale) and the board is a ranking of
+//      relative value, not a price forecast.
+//   7. Per-category walk-forward: the same forward/reverse test, run
+//      category by category (only categories with at least two live comps
+//      on each side of 2024-01-01), worst first. Each side shares one
+//      exponent — the one fitted on that side's whole live set — and
+//      differs only in the category scale. One average error hides where
 //      the model fails; this table is the honest version of it, and the
 //      build log prints its three worst rows so a reader sees them first.
 //
 // What the snapshot does NOT carry, and the model does not invent: fees,
 // runway and FDV. No fee or runway figure exists in the snapshot, so no
-// multiple here claims to be a fee multiple, and no row claims a runway.
+// scale here claims to be a fee multiple, and no row claims a runway.
 // The honest proxy for a protocol's earning power in this file is its TVL
 // and its seven-day growth; the dashboard states that plainly.
 
@@ -109,7 +144,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 160;
@@ -117,11 +152,11 @@ export const EARLY_ROWS = 160;
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
 
-/** One category's calibrated multiple, for the dashboard's calibration table. */
+/** One category's calibrated scale, for the dashboard's calibration table. */
 export interface CategoryMultiple {
   category: string;
   live_n: number;
-  multiple: number;
+  scale: number;
   spread: number;
 }
 
@@ -136,7 +171,7 @@ export interface CategoryBacktest {
 /** The walk-forward check, computed at build time from the snapshot's live set. */
 export interface Backtest {
   live_n: number;
-  radar3_med_abs_log_err: number;
+  radar_med_abs_log_err: number;
   starter_med_abs_log_err: number;
   forward_med_abs_log_err: number;
   reverse_med_abs_log_err: number;
@@ -146,7 +181,8 @@ export interface Backtest {
 
 /** The calibration the model fitted from the snapshot, for the dashboard. */
 export interface Calibration {
-  global_multiple: number;
+  global_scale: number;
+  tvl_exponent: number;
   categories: CategoryMultiple[];
   backtest: Backtest;
 }
@@ -174,7 +210,7 @@ export interface BoardRow {
   token_status: 'pre-token';
   age_days: number | null;
   implied_value_usd: number;
-  category_multiple: number;
+  category_scale: number;
   calibration: 'calibrated' | 'global';
   upside_per_dollar: number;
   model: {
@@ -201,7 +237,7 @@ export interface RadarRow {
   implied_value_usd: number;
   growth_multiplier: number;
   maturity_multiplier: number;
-  category_multiple: number;
+  category_scale: number;
   calibration: 'calibrated' | 'global';
   upside_per_dollar: number;
 }
@@ -282,32 +318,65 @@ export function liveSet(snapshot: Snapshot): SnapshotProtocol[] {
   );
 }
 
-/** The residual multiple of one live protocol: mcap over TVL times its multipliers. */
-function residual(p: SnapshotProtocol, asOf: string, model: ModelConstants): number {
-  const { growthMult, maturityMult } = multipliers(p, asOf, model);
-  return (p.mcap_usd as number) / (p.tvl_usd * growthMult * maturityMult);
+/** The TVL exponent, fitted from a set of live protocols: the OLS slope of
+ * log(mcap / (growth x maturity)) on log(TVL). A market cap that grew
+ * linearly with TVL would give 1.0; this snapshot gives 0.37. Clamped to
+ * [0.1, 1.0] so a noisy fit can never claim market cap falls as TVL grows,
+ * or grows faster than linearly. Falls back to 0.5 when the set cannot
+ * support a slope at all (fewer than two protocols, or no TVL spread). */
+export function fitAlpha(live: SnapshotProtocol[], asOf: string, model: ModelConstants): number {
+  if (live.length < 2) return 0.5;
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (const p of live) {
+    const { growthMult, maturityMult } = multipliers(p, asOf, model);
+    xs.push(Math.log(p.tvl_usd));
+    ys.push(Math.log((p.mcap_usd as number) / (growthMult * maturityMult)));
+  }
+  const mx = xs.reduce((a, b) => a + b, 0) / xs.length;
+  const my = ys.reduce((a, b) => a + b, 0) / ys.length;
+  const sxx = xs.reduce((a, x) => a + (x - mx) * (x - mx), 0);
+  if (!(sxx > 0)) return 0.5;
+  const slope = xs.reduce((a, x, i) => a + (x - mx) * (ys[i]! - my), 0) / sxx;
+  if (!Number.isFinite(slope)) return 0.5;
+  return Math.min(1.0, Math.max(0.1, slope));
 }
 
-/** Fit the calibration from a set of live protocols (global + per-category multiples). */
+/** The residual scale of one live protocol: mcap over TVL^alpha times its multipliers. */
+function residual(p: SnapshotProtocol, asOf: string, model: ModelConstants, alpha: number): number {
+  const { growthMult, maturityMult } = multipliers(p, asOf, model);
+  return (p.mcap_usd as number) / (Math.pow(p.tvl_usd, alpha) * growthMult * maturityMult);
+}
+
+/** Fit the calibration from a set of live protocols (exponent + global and
+ * per-category scales). The exponent and the global scale are fitted from
+ * this set alone, unless `fixedAlpha` is given: the per-category
+ * walk-forward shares one exponent per half (fitted on that half's whole
+ * live set, as the board does), because an exponent fitted on a category's
+ * two or three comps is noise — on this snapshot those fits land on the
+ * clamp bounds (0.10 and 1.00) and the category errors blow up. A
+ * walk-forward fit on the older half must not borrow the full set's
+ * exponent, because the scale's units depend on alpha. */
 function fitCalibration(
   live: SnapshotProtocol[],
   asOf: string,
   model: ModelConstants,
-  fallbackGlobal?: number,
-): { global: number; byCategory: Map<string, number>; counts: Map<string, number>; spreads: Map<string, number> } {
-  const global = fallbackGlobal ?? median(live.map((p) => residual(p, asOf, model)));
+  fixedAlpha?: number,
+): { global: number; alpha: number; byCategory: Map<string, number>; counts: Map<string, number>; spreads: Map<string, number> } {
+  const alpha = fixedAlpha ?? fitAlpha(live, asOf, model);
+  const global = median(live.map((p) => residual(p, asOf, model, alpha)));
   const byCat = new Map<string, number[]>();
   for (const p of live) {
     const c = p.category ?? 'Other';
     if (!byCat.has(c)) byCat.set(c, []);
-    byCat.get(c)!.push(residual(p, asOf, model));
+    byCat.get(c)!.push(residual(p, asOf, model, alpha));
   }
-  // One guardrail, stated on the dashboard: no multiple runs past three
-  // times the global median, so one live comp's 400x ratio can never set a
+  // One guardrail, stated on the dashboard: no scale runs past three
+  // times the global scale, so one live comp's 400x ratio can never set a
   // whole category. Small categories are handled by the shrinkage itself:
-  // with one or two comps the multiple stays close to global. The spread
-  // is measured here and published beside the multiple; it is a diagnostic
-  // only — weighting the shrinkage by it was tried and made the
+  // with one or two comps the scale stays close to global. The spread
+  // is measured here and published beside the scale; it is a diagnostic
+  // only — weighting the shrinkage by it was tried in radar-3 and made the
   // walk-forward worse, so the fit keeps the plain shrink.
   const byCategory = new Map<string, number>();
   const counts = new Map<string, number>();
@@ -318,18 +387,18 @@ function fitCalibration(
     const catMedian = median(rs);
     const mad = median(rs.map((r) => Math.abs(r - catMedian)));
     spreads.set(c, catMedian > 0 ? mad / catMedian : 0);
-    const mult = (n * catMedian + model.shrink * global) / (n + model.shrink);
-    byCategory.set(c, Math.min(mult, 3 * global));
+    const scale = (n * catMedian + model.shrink * global) / (n + model.shrink);
+    byCategory.set(c, Math.min(scale, 3 * global));
   }
-  return { global, byCategory, counts, spreads };
+  return { global, alpha, byCategory, counts, spreads };
 }
 
 /** Median |log(implied / mcap)| of a fitted calibration on a held-out live set. */
-function heldOutError(fit: { global: number; byCategory: Map<string, number> }, test: SnapshotProtocol[], asOf: string, model: ModelConstants): number {
+function heldOutError(fit: { global: number; alpha: number; byCategory: Map<string, number> }, test: SnapshotProtocol[], asOf: string, model: ModelConstants): number {
   const errs = test.map((p) => {
     const { growthMult, maturityMult } = multipliers(p, asOf, model);
-    const mult = fit.byCategory.get(p.category ?? 'Other') ?? fit.global;
-    const implied = Math.max(1, Math.round(p.tvl_usd * mult * growthMult * maturityMult));
+    const scale = fit.byCategory.get(p.category ?? 'Other') ?? fit.global;
+    const implied = Math.max(1, Math.round(scale * Math.pow(p.tvl_usd, fit.alpha) * growthMult * maturityMult));
     return Math.abs(Math.log(implied / (p.mcap_usd as number)));
   });
   return median(errs);
@@ -350,7 +419,7 @@ function starterError(test: SnapshotProtocol[], asOf: string): number {
 }
 
 /** Per-category walk-forward errors: fit on a category's older comps, test on its newer ones, then back. */
-function categoryBacktests(live: SnapshotProtocol[], asOf: string, model: ModelConstants, global: number): CategoryBacktest[] {
+function categoryBacktests(live: SnapshotProtocol[], asOf: string, model: ModelConstants): CategoryBacktest[] {
   const byCat = new Map<string, SnapshotProtocol[]>();
   for (const p of live) {
     const c = p.category ?? 'Other';
@@ -360,16 +429,21 @@ function categoryBacktests(live: SnapshotProtocol[], asOf: string, model: ModelC
   // A category earns a row only when both sides of the split can be fitted
   // and tested: at least two live comps listed before 2024-01-01 and two
   // after. Fewer than that and the "test" would be one protocol's luck, not
-  // a category's error. The fallback global is the full live set's, so a
-  // category with no comp on the fit side falls back to the same global the
-  // board uses, never to a median fitted on its own handful.
+  // a category's error. Both sides share one exponent each — the exponent
+  // fitted on that side's whole live set, exactly as the board shares one
+  // exponent — and differ only in the category scale fitted on that
+  // side's comps of the category.
+  const oldAll = live.filter((p) => p.listed_at !== null && p.listed_at < '2024-01-01');
+  const recentAll = live.filter((p) => p.listed_at !== null && p.listed_at >= '2024-01-01');
+  const alphaOld = fitAlpha(oldAll, asOf, model);
+  const alphaRecent = fitAlpha(recentAll, asOf, model);
   const out: CategoryBacktest[] = [];
   for (const [c, ps] of byCat) {
     const old = ps.filter((p) => p.listed_at !== null && p.listed_at < '2024-01-01');
     const recent = ps.filter((p) => p.listed_at !== null && p.listed_at >= '2024-01-01');
     if (old.length < 2 || recent.length < 2) continue;
-    const forward = heldOutError(fitCalibration(old, asOf, model, global), recent, asOf, model);
-    const reverse = heldOutError(fitCalibration(recent, asOf, model, global), old, asOf, model);
+    const forward = heldOutError(fitCalibration(old, asOf, model, alphaOld), recent, asOf, model);
+    const reverse = heldOutError(fitCalibration(recent, asOf, model, alphaRecent), old, asOf, model);
     out.push({ category: c, live_n: ps.length, forward_med_abs_log_err: round3(forward), reverse_med_abs_log_err: round3(reverse) });
   }
   const worst = (c: CategoryBacktest): number => Math.max(c.forward_med_abs_log_err, c.reverse_med_abs_log_err);
@@ -381,27 +455,31 @@ export function calibrate(snapshot: Snapshot, model: ModelConstants = MODEL): Ca
   const live = liveSet(snapshot);
   const fit = fitCalibration(live, snapshot.as_of, model);
   const categories: CategoryMultiple[] = [...fit.byCategory.entries()]
-    .map(([category, multiple]) => ({ category, live_n: fit.counts.get(category) ?? 0, multiple: round4(multiple), spread: round3(fit.spreads.get(category) ?? 0) }))
+    .map(([category, scale]) => ({ category, live_n: fit.counts.get(category) ?? 0, scale: round4(scale), spread: round3(fit.spreads.get(category) ?? 0) }))
     .sort((a, b) => b.live_n - a.live_n || (a.category < b.category ? -1 : 1));
   const old = live.filter((p) => p.listed_at !== null && p.listed_at < '2024-01-01');
   const recent = live.filter((p) => p.listed_at !== null && p.listed_at >= '2024-01-01');
   const forward = old.length > 0 && recent.length > 0 ? heldOutError(fitCalibration(old, snapshot.as_of, model), recent, snapshot.as_of, model) : NaN;
   const reverse = old.length > 0 && recent.length > 0 ? heldOutError(fitCalibration(recent, snapshot.as_of, model), old, snapshot.as_of, model) : NaN;
   const both = [...old, ...recent];
-  const radar3 = both.length > 0 ? heldOutError(fit, both, snapshot.as_of, model) : NaN;
+  const radar = both.length > 0 ? heldOutError(fit, both, snapshot.as_of, model) : NaN;
   const starter = both.length > 0 ? starterError(both, snapshot.as_of) : NaN;
-  const band = Number.isFinite(radar3) ? `A ${round3(radar3)} error means the typical implied value is within about x${round2(Math.exp(-radar3))} to x${round2(Math.exp(radar3))} of the market cap` : 'The error is not measurable on this snapshot';
+  const band = Number.isFinite(radar) ? `A ${round3(radar)} error means the typical implied value is within about x${round2(Math.exp(-radar))} to x${round2(Math.exp(radar))} of the market cap` : 'The error is not measurable on this snapshot';
   return {
-    global_multiple: round4(fit.global),
+    global_scale: round4(fit.global),
+    // The exponent is published at full precision, not rounded: the
+    // dashboard recomputes each row from it, and even a 0.001 rounding
+    // moves a large protocol's implied value by ~2% through TVL^alpha.
+    tvl_exponent: fit.alpha,
     categories,
     backtest: {
       live_n: live.length,
-      radar3_med_abs_log_err: round3(radar3),
+      radar_med_abs_log_err: round3(radar),
       starter_med_abs_log_err: round3(starter),
       forward_med_abs_log_err: round3(forward),
       reverse_med_abs_log_err: round3(reverse),
-      category_backtests: categoryBacktests(live, snapshot.as_of, model, fit.global),
-      note: `Walk-forward on the live-token protocols in this snapshot: multiples fitted on protocols listed before 2024-01-01 and tested on those listed after (forward), then the other way round (reverse). Error is median |log(implied / market cap)|. ${band}: TVL alone leaves a wide band, so the board ranks relative value, never a price.`,
+      category_backtests: categoryBacktests(live, snapshot.as_of, model),
+      note: `Walk-forward on the live-token protocols in this snapshot: exponent and scales fitted on protocols listed before 2024-01-01 and tested on those listed after (forward), then the other way round (reverse). Error is median |log(implied / market cap)|. ${band}: TVL alone leaves a wide band, so the board ranks relative value, never a price.`,
     },
   };
 }
@@ -415,16 +493,16 @@ export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
-  fit: { global: number; byCategory: Map<string, number> },
-): { implied: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null; multiple: number; calibration: 'calibrated' | 'global' } {
+  fit: { global: number; alpha: number; byCategory: Map<string, number> },
+): { implied: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null; scale: number; calibration: 'calibrated' | 'global' } {
   const { growthPct, growthMult, maturityMult, age } = multipliers(protocol, asOf, model);
   const cat = protocol.category ?? 'Other';
-  // The multiple the board publishes is the rounded one, so the page can
+  // The scale the board publishes is the rounded one, so the page can
   // recompute the row's implied value exactly from the published figures.
-  const multiple = round4(fit.byCategory.get(cat) ?? fit.global);
+  const scale = round4(fit.byCategory.get(cat) ?? fit.global);
   const calibration = fit.byCategory.has(cat) ? 'calibrated' : 'global';
-  const implied = Math.max(1, Math.round(protocol.tvl_usd * multiple * growthMult * maturityMult));
-  return { implied, growthPct, growthMult, maturityMult, age, multiple, calibration };
+  const implied = Math.max(1, Math.round(scale * Math.pow(protocol.tvl_usd, fit.alpha) * growthMult * maturityMult));
+  return { implied, growthPct, growthMult, maturityMult, age, scale, calibration };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -481,7 +559,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       token_status: 'pre-token',
       age_days: s.age,
       implied_value_usd: s.implied,
-      category_multiple: round4(s.multiple),
+      category_scale: round4(s.scale),
       calibration: s.calibration,
       upside_per_dollar: round2(s.implied / capital),
       model: {
@@ -624,7 +702,7 @@ export function radarRow(row: BoardRow): RadarRow {
     implied_value_usd: row.implied_value_usd,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
-    category_multiple: row.category_multiple,
+    category_scale: row.category_scale,
     calibration: row.calibration,
     upside_per_dollar: row.upside_per_dollar,
   };

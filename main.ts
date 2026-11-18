@@ -1,5 +1,5 @@
-// Token Radar, model radar-3: read the sealed snapshot, score every pre-token
-// protocol with the calibrated model in lib/model.ts, write the ranked board
+// Token Radar, model radar-4: read the sealed snapshot, score every pre-token
+// protocol with the calibrated power-law model in lib/model.ts, write the ranked board
 // to /output/board.json, and copy this repository's dashboard/ and
 // screenshots/ to /output. Last, write /output/dossier.json, the summary the
 // judge reads, with the vendored make.fun library.
@@ -85,7 +85,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: model ${radar.model_version}, global multiple ${radar.calibration.global_multiple}, backtest median |log err| ${radar.calibration.backtest.radar3_med_abs_log_err} vs starter ${radar.calibration.backtest.starter_med_abs_log_err} on ${radar.calibration.backtest.live_n} live protocols\n` +
+    `token radar: model ${radar.model_version}, TVL exponent ${radar.calibration.tvl_exponent}, global scale ${radar.calibration.global_scale}, backtest median |log err| ${radar.calibration.backtest.radar_med_abs_log_err} vs starter ${radar.calibration.backtest.starter_med_abs_log_err} on ${radar.calibration.backtest.live_n} live protocols\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
 
