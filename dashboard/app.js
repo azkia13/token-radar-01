@@ -1,4 +1,4 @@
-// Token Radar dashboard, model radar-4. Reads window.RADAR (written beside
+// Token Radar dashboard, model radar-5. Reads window.RADAR (written beside
 // dashboard/ by main.ts) and renders the ranked board, a filterable table, a
 // per-protocol detail drawer with the model's own inputs and the protocol's
 // farm plan, plus the model's calibration and walk-forward backtest — the
@@ -77,12 +77,14 @@
   }
   // The model in one function: the page recomputes a row from the snapshot
   // figures and checks the number board.json carries, so the page's code and
-  // the board's data are visibly the same arithmetic. radar-4 is a power
+  // the board's data are visibly the same arithmetic. radar-5 is a power
   // law: market cap grows like TVL^alpha, with alpha fitted from the
-  // snapshot, so the TVL term is raised to the calibration's exponent.
+  // snapshot, so the TVL term is raised to the calibration's exponent —
+  // and a fall in TVL compounds, (1 + g / 100)^3, while a rise counts
+  // once, so the growth multiplier is asymmetric.
   function impliedOf(row, model) {
     var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
-    var growthMult = 1 + (growth / 100) * model.growth_weight;
+    var growthMult = growth >= 0 ? 1 + (growth / 100) * model.growth_weight : Math.pow(1 + growth / 100, model.growth_down_power);
     var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
     var maturity = model.maturity_floor + (Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
     return Math.max(1, Math.round(row.category_scale * Math.pow(row.tvl_usd, DATA.calibration.tvl_exponent) * growthMult * maturity));
@@ -279,9 +281,9 @@
     });
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed — and tested' }),
-      el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked. The scale is not one flat number: it is fitted per category from the protocols whose token already trades — and market cap does not grow linearly with TVL, so the TVL term is raised to an exponent the snapshot itself fits (alpha = ' + cal.tvl_exponent.toFixed(3) + ' here: ten times the TVL is worth about three times the market cap, not ten times).' }),
+      el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked. The scale is not one flat number: it is fitted per category from the protocols whose token already trades — and market cap does not grow linearly with TVL, so the TVL term is raised to an exponent the snapshot itself fits (alpha = ' + cal.tvl_exponent.toFixed(3) + ' here: ten times the TVL is worth about three times the market cap, not ten times). Growth is asymmetric: a rise counts once, but a fall compounds — a protocol losing 10% of its TVL a week is valued on the TVL it is heading toward, about three weeks out at that rate.' }),
       el('div', { class: 'formula' },
-        'implied = round( category_scale x tvl_usd^' + cal.tvl_exponent.toFixed(3) + ' x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )'
+        'implied = round( category_scale x tvl_usd^' + cal.tvl_exponent.toFixed(3) + ' x growth(change_7d) x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') ), where growth(g) = 1 + g / 100 for g >= 0 and (1 + g / 100)^' + m.growth_down_power + ' for g < 0, g clamped to [' + m.growth_floor + ', ' + m.growth_cap + ']'
       ),
       el('h3', { text: 'Calibrated scales (k in implied = k x TVL^' + cal.tvl_exponent.toFixed(3) + ', shrunk to the global ' + cal.global_scale + ')' }),
       el('div', { class: 'table-wrap' },
@@ -292,7 +294,7 @@
       ),
       el('p', { class: 'sub', text: 'Spread is the category\'s relative median absolute deviation: how much its live comps disagree about the scale. A wide spread pulls the scale harder toward the global median, so a noisy category cannot set its own scale on scattered evidence.' }),
       el('h3', { text: 'Walk-forward backtest on ' + bt.live_n + ' live-token protocols' }),
-      el('p', { class: 'sub', text: 'Exponent and scales fitted on protocols listed before 2024, tested on those listed after: median |log error| ' + bt.forward_med_abs_log_err + '. The other way round: ' + bt.reverse_med_abs_log_err + '. Fitted and tested on the whole live set (in-sample, so tighter by construction): radar-4 ' + bt.radar_med_abs_log_err + ' vs flat starter ' + bt.starter_med_abs_log_err + ' (the linear radar-3 scored 1.39 walk-forward and 1.24 in-sample on the same test). Lower is tighter.' }),
+      el('p', { class: 'sub', text: 'Exponent and scales fitted on protocols listed before 2024, tested on those listed after: median |log error| ' + bt.forward_med_abs_log_err + '. The other way round: ' + bt.reverse_med_abs_log_err + '. Fitted and tested on the whole live set (in-sample, so tighter by construction): radar-5 ' + bt.radar_med_abs_log_err + ' vs flat starter ' + bt.starter_med_abs_log_err + ' (radar-4 scored 0.95 walk-forward and 0.93 in-sample on the same test). Lower is tighter. One caveat: the growth signal is one week of data, so the walk-forward test validates the form across protocols, not across market weeks; leave-one-out does not confirm the gain.' }),
       el('h3', { text: 'Per-category walk-forward error, worst first' }),
       el('p', { class: 'sub', text: 'The same forward/reverse test per category, for categories with at least two live comps on each side of 2024. One average error hides where the model fails; these rows are where it fails most.' }),
       el('div', { class: 'table-wrap' },

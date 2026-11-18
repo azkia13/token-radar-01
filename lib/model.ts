@@ -1,51 +1,71 @@
-// Token Radar, model radar-4.
+// Token Radar, model radar-5.
 //
-// radar-4 fixes what radar-3 assumed without testing: that a token's market
-// cap scales linearly with TVL (implied = TVL x multiple). The snapshot
-// itself says otherwise. Across the live-token protocols, log market cap
-// against log TVL has an OLS slope of 0.37, not 1.0 — a protocol with ten
-// times the TVL trades at roughly two to three times the market cap, not
-// ten times. radar-3's linear multiple therefore overvalues the biggest
-// protocols and undervalues the small ones, systematically. radar-4 fits
-// that exponent from the snapshot instead of assuming it:
+// radar-5 fixes what radar-4 assumed without testing: that the growth
+// multiplier is linear in the seven-day TVL change, the same slope up as
+// down (implied = ... x (1 + change_7d / 100) x ...). The snapshot itself
+// says otherwise. On the walk-forward protocol, punishing outflows more
+// than inflows — the multiplier compounds a fall, (1 + g / 100)^3 for
+// g < 0, while a rise still counts once, 1 + g / 100 — cuts the mean
+// walk-forward median |log error| from 0.97 to 0.87 across the three
+// splits (0.78 / 0.90 / 0.95 forward, 0.96 / 0.97 / 0.67 reverse).
+// The reading is that the market values a protocol on the TVL it is
+// heading toward, not the TVL it has today: a protocol losing 10% of
+// its TVL a week is worth its TVL about three weeks out at that rate,
+// while a week's inflow may be a single deposit, not a trend, so it
+// counts once. The power form also removes radar-4's principled
+// objection to a steeper down-slope: a linear weight of 2 gives a
+// protocol down 60% a negative multiplier, but (1 + g / 100)^3 stays
+// positive for every clamped g, in [0.064, 1) on the down side.
 //
-//   implied = k_cat x TVL^alpha x growth x maturity
+// The radar-4 base is unchanged: implied = k_cat x TVL^alpha x growth
+// x maturity, alpha fitted by OLS on the live set (log mcap after
+// growth/maturity, on log TVL — 0.48 here, not 1.0, so ten times the TVL
+// is worth about three times the market cap), k_cat the per-category
+// median residual mcap / (TVL^alpha x growth x maturity), shrunk toward
+// the global k with shrink 10 and capped at 3x global. The exponent is
+// fitted on the training half alone inside the walk-forward test, never
+// on the held-out half, and fitted again on the full live set for the
+// board, so a new snapshot re-fits itself instead of inheriting a
+// hand-picked constant. Only the growth multiplier changes, from linear
+// to the asymmetric power above.
 //
-// with alpha fitted by ordinary least squares on the live set (log mcap
-// after growth/maturity, on log TVL), and k_cat the per-category median
-// residual mcap / (TVL^alpha x growth x maturity), shrunk toward the
-// global k exactly as radar-3 shrank its multiples, and capped at 3x
-// global k. Nothing else changes: the same growth and maturity
-// multipliers, the same shrink (10), the same guardrails, the same
-// walk-forward protocol. The exponent is fitted on the training half
-// alone inside the walk-forward test, never on the held-out half, so the
-// test stays honest — and it is fitted again on the full live set for
-// the board, so a new snapshot re-fits itself instead of inheriting a
-// hand-picked constant.
-//
-// What was tried and rejected, on the same walk-forward protocol (average
-// of the forward and reverse median |log error|, three splits:
-// 2024-01-01, 2023-07-01, 2022-07-01; radar-3 averages 1.39 / 1.57 /
-// 1.48 across them, mean 1.48):
-//   - a fixed exponent 0.4: 0.94 / 1.00 / 0.88, mean 0.94 — as good as
-//     the fitted one, but a hand-picked constant that cannot adapt to a
-//     new snapshot, so the fitted exponent wins on principle at the same
-//     accuracy;
-//   - a per-category exponent, shrunk toward the global one: 1.17 / 1.06 /
-//     1.01, mean 1.08 — worse than one shared exponent on every split, so
-//     categories share alpha and differ only in k;
-//   - log-median and trimmed-log residuals instead of the plain median:
-//     1.51 / 1.51 / — and 1.48 / 1.50 / — on the 2024 split, worse than
-//     the median, so the median stays;
-//   - growth_weight 1.5 or 2.0: a little better on the walk-forward
-//     (0.99 / 0.92 mean), but rejected on principle — at weight 2 a
-//     protocol down 60% in seven days gets a growth multiplier of
-//     1 + 2 x (-0.6) = -0.2, a negative multiplier, and the model would
-//     clamp its implied value to $1. A multiplier that can go negative
-//     is not a multiplier. Weight 1.0 keeps it in [0.4, 2.2];
-//   - shrink 5 or 20 instead of 10: 0.95 / 1.05 / 0.86 and 0.97 / 1.07 /
-//     1.06 — within noise of shrink 10 (0.95 / 1.03 / 0.92), so the
-//     radar-3 value stays.
+// What was tried and rejected in the radar-5 round, on the same
+// walk-forward protocol (three splits, forward + reverse, mean of the
+// six cells; radar-4 averages 0.97):
+//   - a listing-year (vintage) factor, shrunk toward zero: 1.02 —
+//     worse, and it adds nothing on top of the power growth, so the
+//     growth effect is not a vintage proxy (growth is uncorrelated
+//     with listing age, r = -0.06);
+//   - a chains-count factor fitted on the residuals: 0.96 — noise;
+//   - a local TVL-neighbourhood calibration (kernel-weighted median
+//     residual, h = 0.5 / 1 / 2): 1.04 / 0.98 / 0.96 — no better
+//     than the per-category scale, and worse at small bandwidths;
+//   - k-nearest-neighbour residuals in log-TVL space (k = 5 / 10 /
+//     20): 1.14 / 0.97 / 0.96 — the same, no better;
+//   - trimming the worst 10% / 20% of training residuals and
+//     refitting: 0.97 / 0.94 on the three splits but 0.99 / 1.00 on
+//     the six-split protocol — not confirmed, so dropped;
+//   - an ensemble (geometric mean of radar-4 and log-median scales):
+//     1.05 — worse;
+//   - full median (LAD) regression with category dummies: 3.59 —
+//     the fit blows up on the small live set;
+//   - an extra log(1 + age) factor, fitted by grid: 1.00 — worse;
+//   - shrinking the TVL exponent toward 0.5 (weight 0.3 / 0.5):
+//     0.95 / 0.98 — noise;
+//   - a down-power above 3 (3.5 / 4): 0.85 / 0.85 on the three
+//     splits but flat on the six-split protocol (0.91 both) and
+//     flat on leave-one-out — the gain saturates, so 3.0, the
+//     round value with the cleanest reading (three weeks out),
+//     wins on principle over the argmax.
+//   One honest caveat, stated here and on the dashboard: the
+//   growth signal is one week of data — every split shares the
+//   same change_7d values — so the walk-forward test validates
+//   the form across protocols, not across market weeks. Leave-
+//   one-out does not confirm the gain (median 1.27, the same as
+//   radar-4), because it trains on nearly the whole live set and
+//   never has to extrapolate across cohorts; the walk-forward
+//   test, which does, is the protocol that decides, and it
+//   decides by 0.09, four times the noise band.
 //
 //   1. Live set: every protocol in the snapshot with a market cap, TVL > 0,
 //      and category != CEX (exchanges are not comparable launches).
@@ -56,7 +76,8 @@
 //      set (0.42 on the pre-2024 half, 0.32 on the post-2024 half).
 //   3. For each live protocol, the residual scale
 //        k = mcap_usd / (tvl_usd^alpha x growthMult x maturityMult)
-//      with growthMult = 1 + clamp(change_7d, -60, 120) / 100 x 1.0 and
+//      with growthMult = 1 + clamp(change_7d, -60, 120) / 100 x 1.0 for a rise
+//      and (1 + clamp(change_7d, -60, 120) / 100)^3 for a fall, and
 //      maturityMult = 0.6 + min(age_days, 1095) / 1095 x 0.4 (age unknown: 365).
 //   4. Global scale = median(k) over the live set. Category scale =
 //      the median k of that category, shrunk toward the global scale:
@@ -123,6 +144,7 @@ export interface Snapshot {
 /** The model's constants, as the dashboard states them and the sandbox may change them. */
 export interface ModelConstants {
   growth_weight: number;
+  growth_down_power: number;
   growth_floor: number;
   growth_cap: number;
   maturity_floor: number;
@@ -134,6 +156,7 @@ export interface ModelConstants {
 
 export const MODEL: ModelConstants = {
   growth_weight: 1.0,
+  growth_down_power: 3.0,
   growth_floor: -60,
   growth_cap: 120,
   maturity_floor: 0.6,
@@ -144,7 +167,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 160;
@@ -305,7 +328,13 @@ export function multipliers(protocol: SnapshotProtocol, asOf: string, model: Mod
   const age = ageDays(asOf, protocol.listed_at);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
-  const growthMult = 1 + (growthPct / 100) * model.growth_weight;
+  // A rise counts once; a fall compounds: the market values a protocol
+  // on the TVL it is heading toward, about three weeks out at the
+  // current weekly rate. The power form stays positive for every
+  // clamped growth, in [0.064, 1) on the down side and [1, 2.2] up.
+  const growthMult = growthPct >= 0
+    ? 1 + (growthPct / 100) * model.growth_weight
+    : Math.pow(1 + growthPct / 100, model.growth_down_power);
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
   return { growthPct, growthMult, maturityMult, age };

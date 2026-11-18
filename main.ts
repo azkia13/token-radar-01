@@ -1,4 +1,4 @@
-// Token Radar, model radar-4: read the sealed snapshot, score every pre-token
+// Token Radar, model radar-5: read the sealed snapshot, score every pre-token
 // protocol with the calibrated power-law model in lib/model.ts, write the ranked board
 // to /output/board.json, and copy this repository's dashboard/ and
 // screenshots/ to /output. Last, write /output/dossier.json, the summary the
